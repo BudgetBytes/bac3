@@ -112,7 +112,11 @@ fn bool List(<String>).isExcluded(self, String s) {
     return false;
 }
 
-fn void! copyFile(Path src, Path dst) {
+fn void! copyFile(Path src, Path dst, Configuration config) {
+    if (config.flags.contains(Flags.VERBOSE.flag)) {
+        io::printfn("INFO: Copying file '%s' to '%s'", src, dst);
+    }
+
     char[] buffer = file::load_temp(src.path_string)!;
 
     File out = file::open(dst.path_string, "wb")!;
@@ -120,11 +124,9 @@ fn void! copyFile(Path src, Path dst) {
     out.write(buffer)!;
 }
 
-fn void! pathWalker(String pathName, String outputDir, Configuration config) {
+fn void! pathWalker(Path src, Path dst, Configuration config) {
 
-    Path path = path::temp_new(pathName)!;
-
-    Path abs = path.absolute()!;
+    Path abs = src.absolute()!;
 
     PathList pathList = path::ls(abs)!;
 
@@ -136,35 +138,52 @@ fn void! pathWalker(String pathName, String outputDir, Configuration config) {
         }
 
         if (config.excludes.isExcluded(absolute.path_string)) continue;
-
-        Path! tmp = path::temp_new(outputDir);
-        if (catch err = tmp) {
-            io::eprintfn("ERROR: Could not create path '%s': %s", outputDir, err);
-            continue;
-        }
         
-        Path! dst = tmp.append(absolute.basename());
-        if (catch err = dst) {
-            io::eprintfn("ERROR: Could not append '%s': %s", tmp, err);
+        Path! dstBase = dst.append(absolute.basename());
+        if (catch err = dstBase) {
+            io::eprintfn("ERROR: Could not append '%s': %s", dst, err);
             continue;
         }
 
         if (path::is_dir(absolute)) {
-            if (catch err = path::mkdir(dst)) {
-                io::eprintfn("ERROR: Could not create directory '%s': %s", dst, err);
+            if (catch err = path::mkdir(dstBase)) {
+                io::eprintfn("ERROR: Could not create directory '%s': %s", dstBase, err);
                 continue;
             }
             
-            pathWalker(absolute.path_string, dst.path_string, config)!;
+            pathWalker(absolute, dstBase, config)!;
         } else {
-            if (config.flags.contains(Flags.VERBOSE.flag)) {
-                io::printfn("INFO: Copying file '%s' to '%s'", absolute, dst);
-            }
-
-            if (catch err = copyFile(absolute, dst)) {
-                io::eprintfn("ERROR: Could not copy file '%s' to '%s': %s", absolute, dst, err);
+            if (catch err = copyFile(absolute, dstBase, config)) {
+                io::eprintfn("ERROR: Could not copy file '%s' to '%s': %s", absolute, dstBase, err);
                 continue;
             }
+        }
+    }
+}
+
+fn void! preprocess(String srcStr, String dstStr, Configuration config) {
+    if (!os::native_file_or_dir_exists(srcStr)) {
+        io::eprintfn("ERROR: File or directory does not exists: '%s'", srcStr);
+        return;
+    }
+    
+    Path src = path::temp_new(srcStr)!;
+    
+    Path tmp = path::temp_new(dstStr)!;
+
+    Path dst = tmp.append(src.basename())!;
+
+    if (path::is_dir(src)) {
+        path::mkdir(dst)!;
+    }
+
+    if (catch err = pathWalker(src, dst, config)) {
+        case IoError.FILE_NOT_DIR: {
+            copyFile(src, dst, config)!;
+        }
+        default: {
+            io::eprintfn("ERROR: Failed to pathWalk: '%s'", err);
+            return;
         }
     }
 }
@@ -173,13 +192,9 @@ fn void startBackup(Configuration config) {
     Time start = time::now();
     
     foreach(String pathName : config.paths) {
-        if (!os::native_file_or_dir_exists(pathName)) {
-            io::eprintfn("ERROR: File or directory does not exists: '%s'", pathName);
+        if (catch err = preprocess(pathName, config.outputName, config)) {
+            io::eprintfn("ERROR: Could not preprocess '%s' to '%s': %s", pathName, config.outputName, err);
             continue;
-        }
-        
-        if (catch err = pathWalker(pathName, config.outputName, config)) {
-            io::eprintfn("ERROR: Failed to pathWalk: '%s'", err);
         }
     }
 
