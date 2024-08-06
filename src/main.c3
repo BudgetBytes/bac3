@@ -105,62 +105,66 @@ fn ConfigurationState checkInvalidConfiguration(Configuration config) {
     return ConfigurationState.VALID;
 }
 
-
-fn void readFile(Path path) {
-    char[]! buffer = file::load_temp(path.str_view());
-
-    if (catch err = buffer) {
-        io::eprintfn("ERROR: Unable to read: '%s'", path);
-        return;
-    }
-
-    io::printfn("Path: %s", path.str_view());
-}
-
-fn bool isExcluded(String pathName, List(<String>) excludes) {
-    foreach (e : excludes) {
-        if (pathName.contains(e)) {
-            return true;
-        }
+fn bool List(<String>).isExcluded(self, String s) {
+    foreach (e : self) {
+        if (s.contains(e)) return true;
     }
     return false;
 }
 
-fn void pathWalker(String pathName, String outputDir, List(<String>) excludes) {
+fn void! copyFile(Path src, Path dst) {
+    char[] buffer = file::load_temp(src.path_string)!;
 
-    Path path = {
-        pathName,
-        PathEnv.POSIX
-    };
+    File out = file::open(dst.path_string, "wb")!;
 
-    Path! abs = path.absolute();
+    out.write(buffer)!;
+}
 
-    if (catch err = abs) {
-        io::eprintfn("ERROR: Could not get absolute path '%s': %s", pathName, err);
-        return;
-    }
+fn void! pathWalker(String pathName, String outputDir, Configuration config) {
 
-    PathList! pathList = path::ls(abs);
+    Path path = path::temp_new(pathName)!;
 
-    if (catch err = pathList) {
-        io::eprintfn("ERROR: Could not ls path '%s': %s", pathName, err);
-        return;
-    }
+    Path abs = path.absolute()!;
+
+    PathList pathList = path::ls(abs)!;
 
     foreach (p : pathList) {
         Path! absolute = abs.append(p.path_string);
         if (catch err = absolute) {
             io::eprintfn("ERROR: Could not get absolute path '%s': %s", p.path_string, err);
-            return;
+            continue;
         }
 
-        if (isExcluded(absolute.path_string, excludes)) continue;
+        if (config.excludes.isExcluded(absolute.path_string)) continue;
+
+        Path! tmp = path::temp_new(outputDir);
+        if (catch err = tmp) {
+            io::eprintfn("ERROR: Could not create path '%s': %s", outputDir, err);
+            continue;
+        }
+        
+        Path! dst = tmp.append(absolute.basename());
+        if (catch err = dst) {
+            io::eprintfn("ERROR: Could not append '%s': %s", tmp, err);
+            continue;
+        }
 
         if (path::is_dir(absolute)) {
-            pathWalker(absolute.path_string, outputDir, excludes);
-            io::printfn("Directory: %s", absolute);
+            if (catch err = path::mkdir(dst)) {
+                io::eprintfn("ERROR: Could not create directory '%s': %s", dst, err);
+                continue;
+            }
+            
+            pathWalker(absolute.path_string, dst.path_string, config)!;
         } else {
-            io::printfn("File: %s", absolute);
+            if (config.flags.contains(Flags.VERBOSE.flag)) {
+                io::printfn("INFO: Copying file '%s' to '%s'", absolute, dst);
+            }
+
+            if (catch err = copyFile(absolute, dst)) {
+                io::eprintfn("ERROR: Could not copy file '%s' to '%s': %s", absolute, dst, err);
+                continue;
+            }
         }
     }
 }
@@ -174,7 +178,9 @@ fn void startBackup(Configuration config) {
             continue;
         }
         
-        pathWalker(pathName, config.outputName, config.excludes);
+        if (catch err = pathWalker(pathName, config.outputName, config)) {
+            io::eprintfn("ERROR: Failed to pathWalk: '%s'", err);
+        }
     }
 
     Time end = time::now();
